@@ -1,3 +1,3 @@
 cmake -B build
 cmake --build build
-./build/engine
+./build/engine --log-level=debug

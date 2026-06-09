@@ -2,8 +2,8 @@
 #   cmake -B build -DENABLE_ASAN=ON
 #   cmake -B build -DENABLE_TSAN=ON
 #   cmake -B build -DENABLE_UBSAN=ON
-option(ENABLE_ASAN  "Enable Address Sanitizer (-fsanitize=address)"           OFF)
-option(ENABLE_TSAN  "Enable Thread Sanitizer (-fsanitize=thread)"             OFF)
+option(ENABLE_ASAN  "Enable Address Sanitizer (-fsanitize=address)" OFF)
+option(ENABLE_TSAN  "Enable Thread Sanitizer (-fsanitize=thread)" OFF)
 option(ENABLE_UBSAN "Enable Undefined Behavior Sanitizer (-fsanitize=undefined)" OFF)
 
 function(enable_sanitisers target)

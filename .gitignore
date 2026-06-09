@@ -1,6 +1,9 @@
 # Build directory (cmake -B build)
 code/build/
 
+# Runtime-generated log files
+code/logs/
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
