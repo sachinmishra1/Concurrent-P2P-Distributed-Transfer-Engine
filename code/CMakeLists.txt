@@ -51,4 +51,16 @@ target_link_libraries(engine PRIVATE
     cryptopp::cryptopp
 )
 
+add_executable(tests 
+              tests/test_bencode.cpp
+              src/bencode.cpp
+)
+target_include_directories(tests PUBLIC include)
+set_target_warnings(tests)
+enable_sanitisers(tests)
+target_link_libraries(tests PRIVATE
+    gtest_main
+    spdlog::spdlog
+)
+
 

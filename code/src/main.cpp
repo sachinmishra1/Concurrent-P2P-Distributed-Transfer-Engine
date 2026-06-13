@@ -238,7 +238,7 @@ int main(int argc, char *argv[]) {
   // test_bencode_parser();
 
   // Run BencodeEncoder verification tests
-  test_bencode_encoder();
+  // test_bencode_encoder();
 
   // Parse command line arguments for --log-level=
   std::string log_level = "info"; // Default string
