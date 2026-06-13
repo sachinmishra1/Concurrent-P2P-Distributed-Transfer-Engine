@@ -32,7 +32,7 @@ Serialisation format used by bittorrent. It encodes .torrent files and tracker r
     - i0e  -> 0
     - i-7e -> -7
 - Rules:
-    - No leading zero. i03e is INVALID
+    - No leading zero. i03e is INVALID, i00e is INVALID.
     - i0e is only way to encode zero
     - i-0e is INVALID
     - no size limit
