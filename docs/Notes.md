@@ -147,3 +147,34 @@ To scale to thousands of concurrent peer connections without incurring the overh
   - This delta is passed as the `timeout` parameter to `epoll_wait`.
   - This ensures that if no socket events arrive, `epoll_wait` wakes up exactly at the time the next timer is scheduled to fire.
 - **Deferred Deletion (Cancellation)**: To allow $O(1)$ timer cancellations, cancelled timer IDs are added to a hash set. When a timer is popped from the heap, if its ID is in the cancelled set, it is silently discarded without triggering its callback.
+
+## Tracker Protocol and Announce Mechanics
+
+The BitTorrent tracker is an HTTP server that keeps track of the peers participating in the torrent's swarm.
+
+### HTTP GET Announce Request
+To retrieve the list of peers, the client sends an HTTP GET request to the torrent's `announce` URL. The query parameters are:
+- `info_hash`: 20-byte SHA-1 hash of the `info` dictionary, URL-encoded.
+- `peer_id`: 20-byte unique ID of the client, URL-encoded.
+- `port`: The TCP port the client is listening on (typically 6881-6889).
+- `uploaded`: Number of bytes uploaded since the client sent the event.
+- `downloaded`: Number of bytes downloaded.
+- `left`: Number of bytes remaining to download.
+- `compact`: Setting `compact=1` tells the tracker to return the peer list in compact format (preferred for reduced network bandwidth).
+- `event`: (Optional) `started`, `completed`, `stopped`.
+
+### URL Encoding Raw Binary Data
+Since `info_hash` and `peer_id` are raw 20-byte digests, characters outside the RFC 3986 unreserved set (`a-z`, `A-Z`, `0-9`, `-`, `_`, `.`, `~`) must be percent-encoded as `%XX`, where `XX` is the hexadecimal representation of the byte.
+
+### Tracker Response Formatting
+The response is Bencoded.
+- **Failure**: If the dictionary contains `failure reason`, it indicates the request failed.
+- **Compact Peers Format**: The `peers` key contains a single string of length multiple of 6. Each 6-byte group represents one peer:
+  - 4 bytes: IPv4 Address (network byte order).
+  - 2 bytes: Port number (network byte order).
+- **List Peers Format**: The `peers` key contains a list of dictionaries, each having keys `ip`, `port`, and optionally `peer id`.
+
+## Peer ID Generation
+Clients generate a unique 20-byte identifier at startup. The standard convention is the Azureus-style format:
+- **Prefix**: 8 bytes representing the client identifier (e.g., `-DT0001-` for this client).
+- **Suffix**: 12 random alphanumeric characters to guarantee uniqueness per run.

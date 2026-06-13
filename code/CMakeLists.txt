@@ -44,6 +44,8 @@ add_executable(engine
               src/hasher.cpp
               src/tcp_connection.cpp
               src/event_loop.cpp
+              src/tracker_client.cpp
+              src/peer_id.cpp
 )
 
 target_include_directories(engine PUBLIC include)
@@ -62,6 +64,8 @@ add_executable(tests
               src/hasher.cpp
               src/tcp_connection.cpp
               src/event_loop.cpp
+              src/tracker_client.cpp
+              src/peer_id.cpp
 )
 target_include_directories(tests PUBLIC include)
 set_target_warnings(tests)
@@ -70,6 +74,7 @@ target_link_libraries(tests PRIVATE
     gtest_main
     spdlog::spdlog
     cryptopp::cryptopp
+    CURL::libcurl
 )
 
 

@@ -4,6 +4,8 @@
 #include "hasher.hpp"
 #include "tcp_connection.hpp"
 #include "event_loop.hpp"
+#include "tracker_client.hpp"
+#include "peer_id.hpp"
 #include <cryptopp/sha.h>
 #include <filesystem>
 #include <sys/socket.h>
@@ -669,4 +671,99 @@ TEST(EventLoopTest, Concurrent128Connections) {
     size_t end_fd_count = get_open_fd_count();
     EXPECT_EQ(end_fd_count, start_fd_count);
 }
+
+// 32. TrackerClient URL encoding tests
+TEST(TrackerClientTest, UrlEncoding) {
+    // Standard unreserved chars
+    std::string unreserved = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~";
+    std::vector<uint8_t> data1(unreserved.begin(), unreserved.end());
+    EXPECT_EQ(TrackerClient::url_encode(data1), unreserved);
+
+    // Reserved/special chars
+    std::vector<uint8_t> data2 = {0x00, 0x1F, 0x20, 0x7F, 0x80, 0xFF, 'A', '%'};
+    // Expected: %00%1F%20%7F%80%FFA%25
+    EXPECT_EQ(TrackerClient::url_encode(data2), "%00%1F%20%7F%80%FFA%25");
+}
+
+// 33. TrackerClient Compact response parsing
+TEST(TrackerClientTest, CompactResponseParsing) {
+    // Construct a mock tracker response dictionary with:
+    // interval = 1800, complete = 5, incomplete = 2
+    // peers = 12 bytes string representing two peers:
+    //   Peer 1: 127.0.0.1:6881 (7F 00 00 01 1A E1)
+    //   Peer 2: 192.168.1.10:8080 (C0 A8 01 0A 1F 90)
+    std::vector<uint8_t> response_bytes = {
+        'd', '8', ':', 'c', 'o', 'm', 'p', 'l', 'e', 't', 'e', 'i', '5', 'e',
+        '1', '0', ':', 'i', 'n', 'c', 'o', 'm', 'p', 'l', 'e', 't', 'e', 'i', '2', 'e',
+        '8', ':', 'i', 'n', 't', 'e', 'r', 'v', 'a', 'l', 'i', '1', '8', '0', '0', 'e',
+        '5', ':', 'p', 'e', 'e', 'r', 's', '1', '2', ':',
+        0x7F, 0x00, 0x00, 0x01, 0x1A, 0xE1, 0xC0, 0xA8, 0x01, 0x0A, 0x1F, 0x90,
+        'e'
+    };
+
+    TrackerResponse res = TrackerClient::parse_response(response_bytes);
+
+    EXPECT_TRUE(res.failure_reason.empty());
+    EXPECT_EQ(res.interval, 1800);
+    EXPECT_EQ(res.complete, 5);
+    EXPECT_EQ(res.incomplete, 2);
+    ASSERT_EQ(res.peers.size(), 2);
+
+    EXPECT_EQ(res.peers[0].ip, "127.0.0.1");
+    EXPECT_EQ(res.peers[0].port, 6881);
+    EXPECT_TRUE(res.peers[0].id.empty());
+
+    EXPECT_EQ(res.peers[1].ip, "192.168.1.10");
+    EXPECT_EQ(res.peers[1].port, 8080);
+    EXPECT_TRUE(res.peers[1].id.empty());
+}
+
+// 34. TrackerClient List response parsing
+TEST(TrackerClientTest, ListResponseParsing) {
+    // Construct a mock tracker response with:
+    // interval = 900
+    // peers = list of dictionary format:
+    //   [{ip: "10.0.0.5", port: 5000, peer id: "12345678901234567890"}]
+    std::string response = "d8:intervali900e5:peersld2:ip8:10.0.0.57:peer id20:123456789012345678904:porti5000eeee";
+    std::vector<uint8_t> response_bytes(response.begin(), response.end());
+    TrackerResponse res = TrackerClient::parse_response(response_bytes);
+
+    EXPECT_TRUE(res.failure_reason.empty());
+    EXPECT_EQ(res.interval, 900);
+    ASSERT_EQ(res.peers.size(), 1);
+    EXPECT_EQ(res.peers[0].ip, "10.0.0.5");
+    EXPECT_EQ(res.peers[0].port, 5000);
+    EXPECT_EQ(res.peers[0].id, "12345678901234567890");
+}
+
+// 35. TrackerClient Failure response parsing
+TEST(TrackerClientTest, FailureResponseParsing) {
+    std::string response = "d14:failure reason27:info_hash is not registerede";
+    std::vector<uint8_t> response_bytes(response.begin(), response.end());
+    TrackerResponse res = TrackerClient::parse_response(response_bytes);
+
+    EXPECT_EQ(res.failure_reason, "info_hash is not registered");
+    EXPECT_TRUE(res.peers.empty());
+}
+
+// 36. Peer ID Generation tests
+TEST(PeerIdTest, StructureAndEntropy) {
+    auto id1 = generate_peer_id();
+    auto id2 = generate_peer_id();
+
+    // Check prefix
+    std::string prefix(reinterpret_cast<const char*>(id1.data()), 8);
+    EXPECT_EQ(prefix, "-DT0001-");
+
+    // Check that we get different results across runs (entropy check)
+    EXPECT_NE(id1, id2);
+
+    // Verify all remaining characters are alphanumeric
+    for (size_t i = 8; i < 20; ++i) {
+        char c = static_cast<char>(id1[i]);
+        EXPECT_TRUE(std::isalnum(c)) << "Character at index " << i << " is not alphanumeric: " << static_cast<int>(c);
+    }
+}
+
+
 
