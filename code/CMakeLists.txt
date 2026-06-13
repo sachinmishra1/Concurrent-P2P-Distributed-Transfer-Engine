@@ -41,6 +41,7 @@ add_executable(engine
               src/logger.cpp
               src/bencode.cpp
               src/torrent.cpp
+              src/hasher.cpp
 )
 
 target_include_directories(engine PUBLIC include)
@@ -56,6 +57,7 @@ add_executable(tests
               tests/test_bencode.cpp
               src/bencode.cpp
               src/torrent.cpp
+              src/hasher.cpp
 )
 target_include_directories(tests PUBLIC include)
 set_target_warnings(tests)

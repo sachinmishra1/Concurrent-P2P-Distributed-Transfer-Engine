@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "bencode.hpp"
 #include "torrent.hpp"
+#include "hasher.hpp"
 #include <cryptopp/sha.h>
 
 // Helper to convert string_view to span
@@ -256,5 +257,40 @@ TEST(TorrentMetadataTest, InfoHashCalculation) {
                          expected_info_bytes.size());
 
     EXPECT_EQ(meta.info_hash, expected_hash);
+}
+
+// 24. SHA1Hasher One-Shot Hashing
+TEST(SHA1HasherTest, OneShot) {
+    std::string data = "abc";
+    auto digest = SHA1Hasher::hash(data);
+    
+    // Known SHA-1 of "abc" is a9993e364706816aba3e25717850c26c9cd0d89d
+    std::array<uint8_t, 20> expected_digest = {
+        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
+        0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
+    };
+    
+    EXPECT_EQ(digest, expected_digest);
+}
+
+// 25. SHA1Hasher Incremental Hashing
+TEST(SHA1HasherTest, Incremental) {
+    SHA1Hasher hasher;
+    hasher.update("a");
+    hasher.update("b");
+    hasher.update("c");
+    auto digest = hasher.finalize();
+
+    std::array<uint8_t, 20> expected_digest = {
+        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
+        0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
+    };
+    
+    EXPECT_EQ(digest, expected_digest);
+
+    // Verify reset/restart functionality
+    hasher.reset();
+    hasher.update("abc");
+    EXPECT_EQ(hasher.finalize(), expected_digest);
 }
 
