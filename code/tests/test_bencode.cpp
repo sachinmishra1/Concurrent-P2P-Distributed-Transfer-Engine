@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "bencode.hpp"
 #include "torrent.hpp"
+#include <cryptopp/sha.h>
 
 // Helper to convert string_view to span
 std::span<const uint8_t> to_span(std::string_view sv) {
@@ -234,3 +235,26 @@ TEST(TorrentMetadataTest, Invalid) {
         "6:pieces20:00000000000000000000ee"; // length is 100, piece_length is 50, so needs 2 pieces (40 bytes), but pieces has only 20 bytes (1 piece)
     EXPECT_THROW(TorrentMetadata::from_bencode(to_span(mismatched_pieces)), std::runtime_error);
 }
+
+// 23. Torrent Metadata Info Hash Calculation
+TEST(TorrentMetadataTest, InfoHashCalculation) {
+    std::string bencode = 
+        "d8:announce23:http://tracker/announce"
+        "4:infod6:lengthi100e4:name8:test.txt12:piece lengthi50e"
+        "6:pieces40:0000000000000000000000000000000000000000ee";
+
+    auto meta = TorrentMetadata::from_bencode(to_span(bencode));
+
+    std::string expected_info_bytes = 
+        "d6:lengthi100e4:name8:test.txt12:piece lengthi50e"
+        "6:pieces40:0000000000000000000000000000000000000000e";
+
+    std::array<uint8_t, 20> expected_hash{};
+    CryptoPP::SHA1 sha1;
+    sha1.CalculateDigest(expected_hash.data(), 
+                         reinterpret_cast<const uint8_t*>(expected_info_bytes.data()), 
+                         expected_info_bytes.size());
+
+    EXPECT_EQ(meta.info_hash, expected_hash);
+}
+

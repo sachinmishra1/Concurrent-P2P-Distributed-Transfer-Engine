@@ -63,6 +63,7 @@ enable_sanitisers(tests)
 target_link_libraries(tests PRIVATE
     gtest_main
     spdlog::spdlog
+    cryptopp::cryptopp
 )
 
 

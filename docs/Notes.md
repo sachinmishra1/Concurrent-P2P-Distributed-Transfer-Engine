@@ -100,3 +100,11 @@ All fields within the `info` dictionary are used to calculate the torrent's **in
 - `files` (list of dictionaries): A list of files, where each dictionary contains:
   - `length` (integer): Size of the file in bytes.
   - `path` (list of strings): A list of subdirectories and the filename (e.g., `["dir1", "file.txt"]` maps to `dir1/file.txt`).
+
+### Info Hash Computation
+
+The **info_hash** is a unique identifier for a torrent. It is calculated by taking the 20-byte SHA-1 hash of the bencoded `info` dictionary value *exactly as it appears* in the `.torrent` file. 
+
+#### Critical Implementation Details
+- **Raw Bytes Requirement**: Re-encoding a parsed dictionary value to Bencode is not guaranteed to produce identical bytes due to potential minor variations in formatting (e.g., key order, spacing, integer padding). Therefore, the exact raw byte range of the `info` dictionary value must be captured from the incoming `.torrent` file buffer during the parsing phase.
+- **SHA-1 Hashing**: A standard one-shot SHA-1 hash is computed over the captured raw bytes (starting with `d` and ending with the matching `e` of the `info` dictionary) using a cryptographic hashing library (e.g., Crypto++ `SHA1`).

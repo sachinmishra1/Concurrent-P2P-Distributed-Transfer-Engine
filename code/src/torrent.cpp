@@ -2,28 +2,73 @@
 #include "bencode.hpp"
 #include <stdexcept>
 #include <algorithm>
+#include <cryptopp/sha.h>
 
 TorrentMetadata TorrentMetadata::from_bencode(std::span<const uint8_t> torrent_data) {
-    BencodeValue root = BencodeParser::parse(torrent_data);
-    if (!root.is_dict()) {
+    std::span<const uint8_t> remaining = torrent_data;
+    if (remaining.empty() || remaining[0] != 'd') {
         throw std::runtime_error("TorrentMetadata: root of torrent file must be a dictionary");
     }
+    remaining = remaining.subspan(1); // consume 'd'
 
-    const auto& root_dict = root.as_dict();
-    
-    // announce_url (required key)
-    auto announce_it = root_dict.find("announce");
-    if (announce_it == root_dict.end() || !announce_it->second.is_string()) {
-        throw std::runtime_error("TorrentMetadata: missing or invalid 'announce' URL");
+    std::string announce_url;
+    BencodeValue info_val;
+    std::span<const uint8_t> info_span;
+
+    BencodeString last_key;
+    bool has_last_key = false;
+
+    while (!remaining.empty() && remaining[0] != 'e') {
+        BencodeString key = BencodeParser::parse_string(remaining);
+        
+        // Lexicographical sorting check for root dict keys
+        if (has_last_key) {
+            if (key <= last_key) {
+                if (key == last_key) {
+                    throw std::runtime_error("TorrentMetadata: duplicate key in root dictionary");
+                }
+                throw std::runtime_error("TorrentMetadata: root dictionary keys not sorted lexicographically");
+            }
+        }
+        last_key = key;
+        has_last_key = true;
+
+        if (key == "announce") {
+            BencodeValue val = BencodeParser::parse_value(remaining);
+            if (!val.is_string()) {
+                throw std::runtime_error("TorrentMetadata: 'announce' must be a string");
+            }
+            announce_url = std::string(val.as_string());
+        } else if (key == "info") {
+            const uint8_t* info_start = remaining.data();
+            info_val = BencodeParser::parse_value(remaining);
+            const uint8_t* info_end = remaining.data();
+            if (info_end < info_start) {
+                throw std::runtime_error("TorrentMetadata: invalid parsing of 'info' dictionary");
+            }
+            info_span = std::span<const uint8_t>(info_start, static_cast<size_t>(info_end - info_start));
+        } else {
+            // parse and ignore other keys
+            BencodeParser::parse_value(remaining);
+        }
     }
-    std::string announce_url(announce_it->second.as_string());
 
-    // info dictionary (required key)
-    auto info_it = root_dict.find("info");
-    if (info_it == root_dict.end() || !info_it->second.is_dict()) {
+    if (remaining.empty() || remaining[0] != 'e') {
+        throw std::runtime_error("TorrentMetadata: expected 'e' at end of root dictionary");
+    }
+    remaining = remaining.subspan(1); // consume 'e'
+
+    if (!remaining.empty()) {
+        throw std::runtime_error("TorrentMetadata: extra data at end of input");
+    }
+
+    if (announce_url.empty()) {
+        throw std::runtime_error("TorrentMetadata: missing 'announce' URL");
+    }
+    if (!info_val.is_dict()) {
         throw std::runtime_error("TorrentMetadata: missing or invalid 'info' dictionary");
     }
-    const auto& info_dict = info_it->second.as_dict();
+    const auto& info_dict = info_val.as_dict();
 
     // piece length (required key)
     auto piece_length_it = info_dict.find("piece length");
@@ -126,6 +171,13 @@ TorrentMetadata TorrentMetadata::from_bencode(std::span<const uint8_t> torrent_d
         throw std::runtime_error("TorrentMetadata: mismatch between piece count and total length");
     }
 
+    // Compute info_hash (SHA-1 over raw info dictionary value bytes)
+    std::array<uint8_t, 20> info_hash{};
+    if (!info_span.empty()) {
+        CryptoPP::SHA1 sha1;
+        sha1.CalculateDigest(info_hash.data(), info_span.data(), info_span.size());
+    }
+
     return TorrentMetadata{
         .name = std::move(name),
         .announce_url = std::move(announce_url),
@@ -134,6 +186,6 @@ TorrentMetadata TorrentMetadata::from_bencode(std::span<const uint8_t> torrent_d
         .num_pieces = static_cast<int32_t>(num_pieces),
         .piece_hashes = std::move(piece_hashes),
         .files = std::move(files),
-        .info_hash = {}
+        .info_hash = info_hash
     };
 }

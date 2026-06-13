@@ -69,10 +69,12 @@ public:
     static BencodeValue parse(std::span<const uint8_t> input);
     static std::vector<uint8_t> encode(const BencodeValue& value);
 
-private:
+    // Helpers for custom parsing
     static BencodeValue parse_value(std::span<const uint8_t>& remaining);
-    static BencodeInt parse_int(std::span<const uint8_t>& remaining);
     static BencodeString parse_string(std::span<const uint8_t>& remaining);
+
+private:
+    static BencodeInt parse_int(std::span<const uint8_t>& remaining);
     static BencodeList parse_list(std::span<const uint8_t>& remaining);
     static BencodeDict parse_dict(std::span<const uint8_t>& remaining);
     static void encode_value(const BencodeValue& value, std::vector<uint8_t>& out);
