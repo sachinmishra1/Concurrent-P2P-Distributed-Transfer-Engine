@@ -107,4 +107,43 @@ The **info_hash** is a unique identifier for a torrent. It is calculated by taki
 
 #### Critical Implementation Details
 - **Raw Bytes Requirement**: Re-encoding a parsed dictionary value to Bencode is not guaranteed to produce identical bytes due to potential minor variations in formatting (e.g., key order, spacing, integer padding). Therefore, the exact raw byte range of the `info` dictionary value must be captured from the incoming `.torrent` file buffer during the parsing phase.
-- **SHA-1 Hashing**: A standard one-shot SHA-1 hash is computed over the captured raw bytes (starting with `d` and ending with the matching `e` of the `info` dictionary) using a cryptographic hashing library (e.g., Crypto++ `SHA1`).
+- **SHA-1 Hashing**: A standard one-shot SHA-1 hash is computed over the captured raw bytes (starting with `d` and ending with the matching `e` of the `info` dictionary) using a cryptographic hashing library (e.g., Crypto++ `SHA1`).  
+
+## Non-Blocking TCP Sockets in Linux
+
+BitTorrent networks require handling multiple concurrent connections to peers. To do this efficiently in a single thread, non-blocking I/O and event loops are utilized.
+
+### Non-Blocking Socket Operations
+- **O_NONBLOCK flag**: Configures a socket descriptor so that socket operations return immediately instead of blocking execution.
+- **Asynchronous connect (`connect`)**:
+  - Initiating a connection on a non-blocking socket returns `-1` with `errno` set to `EINPROGRESS`.
+  - The connection process happens in the background. Once it finishes successfully, the socket becomes writable in `epoll`.
+  - To verify the connection status, check the socket option `SO_ERROR` using `getsockopt`.
+- **Non-blocking read (`recv`)**:
+  - Returns `-1` with `errno` set to `EAGAIN` or `EWOULDBLOCK` if there is no data in the system buffer to read.
+  - Returns `0` if the peer has closed the connection.
+- **Non-blocking write (`send`)**:
+  - Returns `-1` with `errno` set to `EAGAIN` or `EWOULDBLOCK` if the system send buffer is full.
+  - Passing the flag `MSG_NOSIGNAL` is critical. It prevents the process from receiving a `SIGPIPE` signal (which crashes the application by default) if the peer closed the connection; instead, `send` safely returns `-1` with `errno = EPIPE`.
+
+### Lifetime & Ownership (RAII)
+- Sockets manage a scarce system resource (file descriptors). 
+- To avoid leaks, the socket descriptor must be safely closed via `close()` inside the destructor.
+- Sockets must be **move-only** to ensure there is exactly one owner of a file descriptor.
+
+## Asynchronous Event Multiplexing with epoll
+
+To scale to thousands of concurrent peer connections without incurring the overhead of thread-per-connection scheduling, Linux provides `epoll`, an $O(1)$ scaling event notification interface.
+
+### Epoll Core Mechanics
+- **`epoll_create1(int flags)`**: Instantiates an epoll control structure. The `EPOLL_CLOEXEC` flag is used to prevent the file descriptor from leaking across program executions.
+- **`epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)`**: Registers interest in events (read `EPOLLIN`, write `EPOLLOUT`, errors `EPOLLERR` or peer connection drops `EPOLLRDHUP`/`EPOLLHUP`) on a specific file descriptor.
+- **`epoll_wait(...)`**: Blocks the thread until registered file descriptors report events or a timeout occurs.
+
+### Timer Min-Heap Design
+- **Deadline Sorting**: Timers are stored in a min-priority queue (`std::priority_queue` with `std::greater`) based on their absolute expiration time (e.g. using `std::chrono::steady_clock`).
+- **Dynamic Epoll Timeouts**:
+  - In each iteration of the event loop, the time remaining until the next scheduled timer expiration is calculated.
+  - This delta is passed as the `timeout` parameter to `epoll_wait`.
+  - This ensures that if no socket events arrive, `epoll_wait` wakes up exactly at the time the next timer is scheduled to fire.
+- **Deferred Deletion (Cancellation)**: To allow $O(1)$ timer cancellations, cancelled timer IDs are added to a hash set. When a timer is popped from the heap, if its ID is in the cancelled set, it is silently discarded without triggering its callback.
