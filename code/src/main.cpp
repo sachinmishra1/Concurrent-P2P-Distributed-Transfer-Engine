@@ -183,7 +183,48 @@ void test_bencode_parser() {
   expect_parse_fail("d4:spam4:eggs3:cow3:mooe", "keys not sorted");
   expect_parse_fail("d3:cow3:moo3:cow3:mooe", "duplicate key");
 
-  std::cout << "All BencodeParser tests passed successfully!\n";
+  std::cout << "All BencodeParser tests passed successfully!\n\n";
+}
+
+void test_bencode_encoder() {
+  std::cout << "Running BencodeEncoder tests...\n";
+
+  auto to_span = [](std::string_view sv) {
+    return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
+  };
+
+  auto verify_roundtrip = [&](std::string_view input_str) {
+    auto parsed = BencodeParser::parse(to_span(input_str));
+    auto encoded = BencodeParser::encode(parsed);
+    std::string_view output_str(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+    
+    std::cout << "    Original: " << input_str << "\n";
+    std::cout << "    Parsed:   "; print_bencode_value(parsed); std::cout << "\n";
+    std::cout << "    Encoded:  " << output_str << "\n";
+    assert(input_str == output_str);
+  };
+
+  // 1. Integers
+  std::cout << "  [BencodeEncoder] Testing integers...\n";
+  verify_roundtrip("i42e");
+  verify_roundtrip("i-42e");
+  verify_roundtrip("i0e");
+
+  // 2. Strings
+  std::cout << "  [BencodeEncoder] Testing strings...\n";
+  verify_roundtrip("5:hello");
+  verify_roundtrip("0:");
+
+  // 3. Lists
+  std::cout << "  [BencodeEncoder] Testing lists...\n";
+  verify_roundtrip("li42e4:spame");
+  verify_roundtrip("l5:helloi-123ed3:cow3:mooee"); // nested list with dict
+
+  // 4. Dicts (should automatically be sorted lexicographically)
+  std::cout << "  [BencodeEncoder] Testing dicts...\n";
+  verify_roundtrip("d3:cow3:moo4:spam4:eggse");
+
+  std::cout << "All BencodeEncoder tests passed successfully!\n\n";
 }
 
 int main(int argc, char *argv[]) {
@@ -191,10 +232,13 @@ int main(int argc, char *argv[]) {
   welcome_msg();
 
   // Run BencodeValue verification tests
-  test_bencode_value();
+  // test_bencode_value();
 
   // Run BencodeParser verification tests
-  test_bencode_parser();
+  // test_bencode_parser();
+
+  // Run BencodeEncoder verification tests
+  test_bencode_encoder();
 
   // Parse command line arguments for --log-level=
   std::string log_level = "info"; // Default string

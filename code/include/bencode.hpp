@@ -67,6 +67,7 @@ struct BencodeValue {
 class BencodeParser {
 public:
     static BencodeValue parse(std::span<const uint8_t> input);
+    static std::vector<uint8_t> encode(const BencodeValue& value);
 
 private:
     static BencodeValue parse_value(std::span<const uint8_t>& remaining);
@@ -74,4 +75,5 @@ private:
     static BencodeString parse_string(std::span<const uint8_t>& remaining);
     static BencodeList parse_list(std::span<const uint8_t>& remaining);
     static BencodeDict parse_dict(std::span<const uint8_t>& remaining);
+    static void encode_value(const BencodeValue& value, std::vector<uint8_t>& out);
 };

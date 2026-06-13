@@ -178,3 +178,44 @@ BencodeDict BencodeParser::parse_dict(std::span<const uint8_t>& remaining) {
 
     return dict;
 }
+
+std::vector<uint8_t> BencodeParser::encode(const BencodeValue& value) {
+    std::vector<uint8_t> out;
+    encode_value(value, out);
+    return out;
+}
+
+void BencodeParser::encode_value(const BencodeValue& value, std::vector<uint8_t>& out) {
+    std::visit([&out](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, BencodeInt>) {
+            out.push_back('i');
+            std::string s = std::to_string(arg);
+            out.insert(out.end(), s.begin(), s.end());
+            out.push_back('e');
+        } else if constexpr (std::is_same_v<T, BencodeString>) {
+            std::string len_str = std::to_string(arg.size());
+            out.insert(out.end(), len_str.begin(), len_str.end());
+            out.push_back(':');
+            out.insert(out.end(), arg.begin(), arg.end());
+        } else if constexpr (std::is_same_v<T, BencodeList>) {
+            out.push_back('l');
+            for (const auto& item : arg) {
+                encode_value(item, out);
+            }
+            out.push_back('e');
+        } else if constexpr (std::is_same_v<T, BencodeDict>) {
+            out.push_back('d');
+            for (const auto& [k, v] : arg) {
+                // Encode key (string)
+                std::string len_str = std::to_string(k.size());
+                out.insert(out.end(), len_str.begin(), len_str.end());
+                out.push_back(':');
+                out.insert(out.end(), k.begin(), k.end());
+                // Encode value
+                encode_value(v, out);
+            }
+            out.push_back('e');
+        }
+    }, value.data);
+}
