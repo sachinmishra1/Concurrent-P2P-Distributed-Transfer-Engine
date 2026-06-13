@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "bencode.hpp"
+#include "torrent.hpp"
 
 // Helper to convert string_view to span
 std::span<const uint8_t> to_span(std::string_view sv) {
@@ -155,4 +156,81 @@ TEST(BencodeRoundtripTest, Dictionaries) {
         std::string_view output(reinterpret_cast<const char*>(encoded.data()), encoded.size());
         EXPECT_EQ(input, output);
     }
+}
+
+// 20. Torrent Metadata Single-File Parsing
+TEST(TorrentMetadataTest, SingleFile) {
+    // Announce: http://tracker/announce
+    // Info:
+    //   length: 100
+    //   name: test.txt
+    //   piece length: 50
+    //   pieces: 40 bytes (2 pieces) of SHA-1 hashes (zeros here for placeholder)
+    std::string bencode = 
+        "d8:announce23:http://tracker/announce"
+        "4:infod6:lengthi100e4:name8:test.txt12:piece lengthi50e"
+        "6:pieces40:0000000000000000000000000000000000000000ee";
+
+    auto meta = TorrentMetadata::from_bencode(to_span(bencode));
+    EXPECT_EQ(meta.announce_url, "http://tracker/announce");
+    EXPECT_EQ(meta.name, "test.txt");
+    EXPECT_EQ(meta.piece_length, 50);
+    EXPECT_EQ(meta.total_length, 100);
+    EXPECT_EQ(meta.num_pieces, 2);
+    ASSERT_EQ(meta.piece_hashes.size(), 2);
+    EXPECT_EQ(meta.files.size(), 1);
+    EXPECT_EQ(meta.files[0].path, "test.txt");
+    EXPECT_EQ(meta.files[0].length, 100);
+    EXPECT_EQ(meta.files[0].offset, 0);
+}
+
+// 21. Torrent Metadata Multi-File Parsing
+TEST(TorrentMetadataTest, MultiFile) {
+    // Announce: http://tracker/announce
+    // Info:
+    //   name: mydir
+    //   piece length: 256
+    //   pieces: 20 bytes (1 piece) of SHA-1 hash (all zeros)
+    //   files:
+    //     - length: 150
+    //       path: ["subdir", "file1.txt"]
+    //     - length: 100
+    //       path: ["file2.txt"]
+    std::string bencode = 
+        "d8:announce23:http://tracker/announce"
+        "4:infod5:filesld6:lengthi150e4:pathl6:subdir9:file1.txteed6:lengthi100e4:pathl9:file2.txteee"
+        "4:name5:mydir12:piece lengthi256e6:pieces20:00000000000000000000ee";
+
+    auto meta = TorrentMetadata::from_bencode(to_span(bencode));
+    EXPECT_EQ(meta.announce_url, "http://tracker/announce");
+    EXPECT_EQ(meta.name, "mydir");
+    EXPECT_EQ(meta.piece_length, 256);
+    EXPECT_EQ(meta.total_length, 250);
+    EXPECT_EQ(meta.num_pieces, 1);
+    ASSERT_EQ(meta.piece_hashes.size(), 1);
+    
+    ASSERT_EQ(meta.files.size(), 2);
+    EXPECT_EQ(meta.files[0].path, "subdir/file1.txt");
+    EXPECT_EQ(meta.files[0].length, 150);
+    EXPECT_EQ(meta.files[0].offset, 0);
+    
+    EXPECT_EQ(meta.files[1].path, "file2.txt");
+    EXPECT_EQ(meta.files[1].length, 100);
+    EXPECT_EQ(meta.files[1].offset, 150);
+}
+
+// 22. Torrent Metadata Invalid Parsing Checks
+TEST(TorrentMetadataTest, Invalid) {
+    // Missing announce
+    std::string no_announce = 
+        "d4:infod6:lengthi100e4:name8:test.txt12:piece lengthi50e"
+        "6:pieces20:00000000000000000000ee";
+    EXPECT_THROW(TorrentMetadata::from_bencode(to_span(no_announce)), std::runtime_error);
+
+    // Mismatched pieces count vs length
+    std::string mismatched_pieces = 
+        "d8:announce23:http://tracker/announce"
+        "4:infod6:lengthi100e4:name8:test.txt12:piece lengthi50e"
+        "6:pieces20:00000000000000000000ee"; // length is 100, piece_length is 50, so needs 2 pieces (40 bytes), but pieces has only 20 bytes (1 piece)
+    EXPECT_THROW(TorrentMetadata::from_bencode(to_span(mismatched_pieces)), std::runtime_error);
 }

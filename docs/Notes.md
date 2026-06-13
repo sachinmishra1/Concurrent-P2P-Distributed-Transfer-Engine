@@ -72,3 +72,31 @@ Serialisation format used by bittorrent. It encodes .torrent files and tracker r
     - Keys MUST appear in sorted (lexicographic) order
     - Values can be any Bencode type
     - No duplicate keys
+
+## Torrent File Structure & Metadata
+
+A `.torrent` file is a Bencoded dictionary. The structure of this dictionary differs slightly depending on whether it describes a single-file torrent or a multi-file torrent.
+
+### Common Keys
+
+1. `announce` (string): The URL of the tracker.
+2. `info` (dictionary): A dictionary containing metadata about the file(s) in the torrent.
+
+### The `info` Dictionary
+
+All fields within the `info` dictionary are used to calculate the torrent's **info_hash**.
+
+#### Fields present in both Single-File and Multi-File Torrents:
+- `name` (string): 
+  - For single-file: the suggested filename.
+  - For multi-file: the suggested directory name to store the files.
+- `piece length` (integer): Number of bytes in each piece (typically a power of 2, e.g., 262144).
+- `pieces` (string): A concatenated string of 20-byte SHA-1 hashes, one for each piece.
+
+#### Fields for Single-File Torrents:
+- `length` (integer): Size of the file in bytes.
+
+#### Fields for Multi-File Torrents:
+- `files` (list of dictionaries): A list of files, where each dictionary contains:
+  - `length` (integer): Size of the file in bytes.
+  - `path` (list of strings): A list of subdirectories and the filename (e.g., `["dir1", "file.txt"]` maps to `dir1/file.txt`).
