@@ -5,6 +5,8 @@
 #include <variant>
 #include <string_view>
 #include <stdexcept>
+#include <span>
+#include <cstdint>
 
 struct BencodeValue;
 
@@ -60,4 +62,16 @@ struct BencodeValue {
         if (!is_dict()) throw std::runtime_error("BencodeValue: not a dictionary");
         return std::get<BencodeDict>(data);
     }
+};
+
+class BencodeParser {
+public:
+    static BencodeValue parse(std::span<const uint8_t> input);
+
+private:
+    static BencodeValue parse_value(std::span<const uint8_t>& remaining);
+    static BencodeInt parse_int(std::span<const uint8_t>& remaining);
+    static BencodeString parse_string(std::span<const uint8_t>& remaining);
+    static BencodeList parse_list(std::span<const uint8_t>& remaining);
+    static BencodeDict parse_dict(std::span<const uint8_t>& remaining);
 };

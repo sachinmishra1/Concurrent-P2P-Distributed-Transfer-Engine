@@ -39,6 +39,7 @@ FetchContent_MakeAvailable(cryptopp_wrapper)
 add_executable(engine 
               src/main.cpp
               src/logger.cpp
+              src/bencode.cpp
 )
 
 target_include_directories(engine PUBLIC include)
