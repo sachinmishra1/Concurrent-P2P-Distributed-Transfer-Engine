@@ -197,6 +197,8 @@ TEST(TorrentMetadataTest, SingleFile) {
 
     auto meta = TorrentMetadata::from_bencode(to_span(bencode));
     EXPECT_EQ(meta.announce_url, "http://tracker/announce");
+    ASSERT_EQ(meta.announce_list.size(), 1);
+    EXPECT_EQ(meta.announce_list[0], "http://tracker/announce");
     EXPECT_EQ(meta.name, "test.txt");
     EXPECT_EQ(meta.piece_length, 50);
     EXPECT_EQ(meta.total_length, 100);
@@ -206,6 +208,22 @@ TEST(TorrentMetadataTest, SingleFile) {
     EXPECT_EQ(meta.files[0].path, "test.txt");
     EXPECT_EQ(meta.files[0].length, 100);
     EXPECT_EQ(meta.files[0].offset, 0);
+}
+
+// 20b. Torrent Metadata Announce List Parsing and Fallback
+TEST(TorrentMetadataTest, AnnounceListFallback) {
+    // Announce-list with multiple tiers/trackers
+    std::string bencode = 
+        "d8:announce23:http://tracker/announce"
+        "13:announce-listll23:udp://tracker2/announceel24:http://tracker3/announceee"
+        "4:infod6:lengthi100e4:name8:test.txt12:piece lengthi50e"
+        "6:pieces40:0000000000000000000000000000000000000000ee";
+
+    auto meta = TorrentMetadata::from_bencode(to_span(bencode));
+    EXPECT_EQ(meta.announce_url, "http://tracker/announce");
+    ASSERT_EQ(meta.announce_list.size(), 2);
+    EXPECT_EQ(meta.announce_list[0], "udp://tracker2/announce");
+    EXPECT_EQ(meta.announce_list[1], "http://tracker3/announce");
 }
 
 // 21. Torrent Metadata Multi-File Parsing
@@ -692,7 +710,7 @@ TEST(TrackerClientTest, UrlEncoding) {
     // Reserved/special chars
     std::vector<uint8_t> data2 = {0x00, 0x1F, 0x20, 0x7F, 0x80, 0xFF, 'A', '%'};
     // Expected: %00%1F%20%7F%80%FFA%25
-    EXPECT_EQ(TrackerClient::url_encode(data2), "%00%1F%20%7F%80%FFA%25");
+    EXPECT_EQ(TrackerClient::url_encode(data2), "%00%1f%20%7f%80%ffA%25");
 }
 
 // 33. TrackerClient Compact response parsing

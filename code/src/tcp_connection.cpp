@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <utility>
 #include <string>
+#include <cstring>
+#include <spdlog/spdlog.h>
 
 TcpConnection::TcpConnection() : fd_(-1) {}
 
@@ -32,15 +34,18 @@ TcpConnection& TcpConnection::operator=(TcpConnection&& other) noexcept {
 ConnectStatus TcpConnection::connect_async(std::string_view ip, uint16_t port) {
     close();
 
+    spdlog::debug("TcpConnection: socket creation for {}:{}", ip, port);
     // Create IPv4 TCP socket
     fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd_ < 0) {
+        spdlog::error("TcpConnection: socket creation failed: {}", std::strerror(errno));
         return ConnectStatus::Error;
     }
 
     // Set non-blocking flag
     int flags = ::fcntl(fd_, F_GETFL, 0);
     if (flags < 0 || ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
+        spdlog::error("TcpConnection: failed to set O_NONBLOCK: {}", std::strerror(errno));
         close();
         return ConnectStatus::Error;
     }
@@ -53,20 +58,25 @@ ConnectStatus TcpConnection::connect_async(std::string_view ip, uint16_t port) {
     // Parse IP string
     std::string ip_str(ip);
     if (::inet_pton(AF_INET, ip_str.c_str(), &addr.sin_addr) <= 0) {
+        spdlog::error("TcpConnection: invalid or unsupported IP address: {}", ip_str);
         close();
         return ConnectStatus::Error;
     }
 
     // Attempt non-blocking connection
+    spdlog::debug("TcpConnection: calling connect() on fd {} to {}:{}", fd_, ip_str, port);
     int ret = ::connect(fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
     if (ret == 0) {
+        spdlog::debug("TcpConnection: connect() succeeded immediately on fd {}", fd_);
         return ConnectStatus::Connected;
     }
 
     if (errno == EINPROGRESS) {
+        spdlog::debug("TcpConnection: connect() reported EINPROGRESS (asynchronous) on fd {}", fd_);
         return ConnectStatus::InProgress;
     }
 
+    spdlog::warn("TcpConnection: connect() failed immediately on fd {}: {}", fd_, std::strerror(errno));
     close();
     return ConnectStatus::Error;
 }
@@ -90,9 +100,11 @@ IoResult TcpConnection::send(std::span<const uint8_t> data) {
     }
 
     if (errno == EPIPE || errno == ECONNRESET) {
+        spdlog::debug("TcpConnection: send on fd {} failed (connection closed/broken): {}", fd_, std::strerror(errno));
         return IoResult{SocketStatus::Closed, 0};
     }
 
+    spdlog::warn("TcpConnection: send error on fd {}: {}", fd_, std::strerror(errno));
     return IoResult{SocketStatus::Error, 0};
 }
 
@@ -119,14 +131,17 @@ IoResult TcpConnection::recv(std::span<uint8_t> buf) {
     }
 
     if (errno == ECONNRESET) {
+        spdlog::debug("TcpConnection: recv on fd {} failed (connection reset by peer)", fd_);
         return IoResult{SocketStatus::Closed, 0};
     }
 
+    spdlog::warn("TcpConnection: recv error on fd {}: {}", fd_, std::strerror(errno));
     return IoResult{SocketStatus::Error, 0};
 }
 
 void TcpConnection::close() {
     if (fd_ != -1) {
+        spdlog::debug("TcpConnection: closing fd {}", fd_);
         ::close(fd_);
         fd_ = -1;
     }

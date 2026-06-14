@@ -41,6 +41,20 @@ public:
     static TrackerResponse parse_response(std::span<const uint8_t> response_data);
 
 private:
+    TrackerResponse announce_http(const std::string& url,
+                                  uint16_t listening_port,
+                                  uint64_t uploaded,
+                                  uint64_t downloaded,
+                                  uint64_t left,
+                                  std::optional<std::string> event);
+
+    TrackerResponse announce_udp(const std::string& url,
+                                 uint16_t listening_port,
+                                 uint64_t uploaded,
+                                 uint64_t downloaded,
+                                 uint64_t left,
+                                 std::optional<std::string> event);
+
     TorrentMetadata torrent_;
     std::array<uint8_t, 20> peer_id_;
 };

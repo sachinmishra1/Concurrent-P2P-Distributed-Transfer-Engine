@@ -1,4 +1,5 @@
 #include "peer_manager.hpp"
+#include <spdlog/spdlog.h>
 
 PeerManager::PeerManager(EventLoop& loop, 
                          std::array<uint8_t, 20> info_hash, 
@@ -10,6 +11,7 @@ PeerManager::PeerManager(EventLoop& loop,
       max_connections_(max_connections) {}
 
 PeerManager::~PeerManager() {
+    spdlog::debug("PeerManager: destroying and disconnecting all active peers");
     auto peers = std::move(active_peers_);
     for (auto& [key, peer] : peers) {
         peer->on_handshake(nullptr);
@@ -19,17 +21,21 @@ PeerManager::~PeerManager() {
 }
 
 void PeerManager::add_peers(const std::vector<PeerInfo>& peers) {
+    spdlog::info("PeerManager: adding {} peers to potential connection pool", peers.size());
     for (const auto& peer_info : peers) {
         if (active_peers_.size() >= max_connections_) {
+            spdlog::warn("PeerManager: active connections count ({}) reached max_connections ({})", active_peers_.size(), max_connections_);
             break;
         }
 
         if (is_blacklisted(peer_info.ip, peer_info.port)) {
+            spdlog::debug("PeerManager: skipping blacklisted peer {}:{}", peer_info.ip, peer_info.port);
             continue;
         }
 
         std::string key = make_peer_key(peer_info.ip, peer_info.port);
         if (active_peers_.find(key) != active_peers_.end()) {
+            spdlog::trace("PeerManager: peer {}:{} is already active or connecting", peer_info.ip, peer_info.port);
             continue;
         }
 
@@ -39,6 +45,7 @@ void PeerManager::add_peers(const std::vector<PeerInfo>& peers) {
 
 void PeerManager::blacklist_peer(const std::string& ip, uint16_t port) {
     std::string key = make_peer_key(ip, port);
+    spdlog::info("PeerManager: blacklisting peer {}:{}", ip, port);
     blacklist_.insert(key);
 
     auto it = active_peers_.find(key);
@@ -54,9 +61,11 @@ bool PeerManager::is_blacklisted(const std::string& ip, uint16_t port) const {
 
 void PeerManager::connect_to_peer(const std::string& ip, uint16_t port) {
     if (active_peers_.size() >= max_connections_) {
+        spdlog::warn("PeerManager: cannot connect to {}:{}, max connections reached", ip, port);
         return;
     }
     if (is_blacklisted(ip, port)) {
+        spdlog::debug("PeerManager: connect to {}:{} refused (blacklisted)", ip, port);
         return;
     }
     std::string key = make_peer_key(ip, port);
@@ -64,6 +73,7 @@ void PeerManager::connect_to_peer(const std::string& ip, uint16_t port) {
         return;
     }
 
+    spdlog::info("PeerManager: attempting connection to {}:{}", ip, port);
     auto peer = PeerConnection::create(loop_, ip, port, info_hash_, our_peer_id_);
     active_peers_[key] = peer;
 
@@ -71,15 +81,18 @@ void PeerManager::connect_to_peer(const std::string& ip, uint16_t port) {
 
     peer->on_handshake([this, weak_peer](const HandshakeMsg& /*msg*/) {
         if (auto p = weak_peer.lock()) {
+            spdlog::info("PeerManager: peer connected successfully (handshake exchanged) from {}:{}", p->ip(), p->port());
             if (on_peer_connected_cb_) {
                 on_peer_connected_cb_(p);
             }
+            p->send_message(PeerMessage::interested());
         }
     });
 
     peer->on_disconnect([this, key, weak_peer]() {
         std::shared_ptr<PeerConnection> p = weak_peer.lock();
         if (p) {
+            spdlog::info("PeerManager: peer disconnected or connection failed from {}:{}", p->ip(), p->port());
             if (on_peer_disconnected_cb_) {
                 on_peer_disconnected_cb_(p);
             }

@@ -15,6 +15,7 @@ struct FileInfo {
 struct TorrentMetadata {
     std::string name;                  // torrent name
     std::string announce_url;          // tracker URL
+    std::vector<std::string> announce_list; // list of fallback tracker URLs
     int64_t piece_length;              // bytes per piece
     int64_t total_length;              // total bytes across all files
     int32_t num_pieces;                // number of pieces

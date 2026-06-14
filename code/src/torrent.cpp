@@ -12,6 +12,7 @@ TorrentMetadata TorrentMetadata::from_bencode(std::span<const uint8_t> torrent_d
     remaining = remaining.subspan(1); // consume 'd'
 
     std::string announce_url;
+    std::vector<std::string> announce_list;
     BencodeValue info_val;
     std::span<const uint8_t> info_span;
 
@@ -39,6 +40,24 @@ TorrentMetadata TorrentMetadata::from_bencode(std::span<const uint8_t> torrent_d
                 throw std::runtime_error("TorrentMetadata: 'announce' must be a string");
             }
             announce_url = std::string(val.as_string());
+        } else if (key == "announce-list") {
+            BencodeValue val = BencodeParser::parse_value(remaining);
+            if (val.is_list()) {
+                const auto& tier_list = val.as_list();
+                for (const auto& tier : tier_list) {
+                    if (tier.is_list()) {
+                        const auto& tracker_list = tier.as_list();
+                        for (const auto& tracker : tracker_list) {
+                            if (tracker.is_string()) {
+                                std::string tracker_str(tracker.as_string());
+                                if (!tracker_str.empty()) {
+                                    announce_list.push_back(std::move(tracker_str));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         } else if (key == "info") {
             const uint8_t* info_start = remaining.data();
             info_val = BencodeParser::parse_value(remaining);
@@ -178,9 +197,14 @@ TorrentMetadata TorrentMetadata::from_bencode(std::span<const uint8_t> torrent_d
         sha1.CalculateDigest(info_hash.data(), info_span.data(), info_span.size());
     }
 
+    if (announce_list.empty() && !announce_url.empty()) {
+        announce_list.push_back(announce_url);
+    }
+
     return TorrentMetadata{
         .name = std::move(name),
         .announce_url = std::move(announce_url),
+        .announce_list = std::move(announce_list),
         .piece_length = piece_length,
         .total_length = total_length,
         .num_pieces = static_cast<int32_t>(num_pieces),
