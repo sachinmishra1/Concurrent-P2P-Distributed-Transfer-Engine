@@ -46,6 +46,10 @@ add_executable(engine
               src/event_loop.cpp
               src/tracker_client.cpp
               src/peer_id.cpp
+              src/peer_message.cpp
+              src/peer_connection.cpp
+              src/bitfield.cpp
+              src/peer_manager.cpp
 )
 
 target_include_directories(engine PUBLIC include)
@@ -66,6 +70,10 @@ add_executable(tests
               src/event_loop.cpp
               src/tracker_client.cpp
               src/peer_id.cpp
+              src/peer_message.cpp
+              src/peer_connection.cpp
+              src/bitfield.cpp
+              src/peer_manager.cpp
 )
 target_include_directories(tests PUBLIC include)
 set_target_warnings(tests)

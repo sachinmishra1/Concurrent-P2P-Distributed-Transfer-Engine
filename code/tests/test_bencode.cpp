@@ -6,6 +6,10 @@
 #include "event_loop.hpp"
 #include "tracker_client.hpp"
 #include "peer_id.hpp"
+#include "peer_message.hpp"
+#include "peer_connection.hpp"
+#include "bitfield.hpp"
+#include "peer_manager.hpp"
 #include <cryptopp/sha.h>
 #include <filesystem>
 #include <sys/socket.h>
@@ -764,6 +768,351 @@ TEST(PeerIdTest, StructureAndEntropy) {
         EXPECT_TRUE(std::isalnum(c)) << "Character at index " << i << " is not alphanumeric: " << static_cast<int>(c);
     }
 }
+
+// 37. Handshake serialization and deserialization
+TEST(PeerMessageTest, HandshakeRoundtrip) {
+    HandshakeMsg handshake;
+    std::fill(handshake.reserved.begin(), handshake.reserved.end(), 0x00);
+    std::fill(handshake.info_hash.begin(), handshake.info_hash.end(), 0xAA);
+    std::fill(handshake.peer_id.begin(), handshake.peer_id.end(), 0xBB);
+
+    auto bytes = handshake.serialize();
+    ASSERT_EQ(bytes.size(), 68);
+    EXPECT_EQ(bytes[0], 19);
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(bytes.data() + 1), 19), "BitTorrent protocol");
+
+    auto deserialized = HandshakeMsg::deserialize(bytes);
+    ASSERT_TRUE(deserialized.has_value());
+    EXPECT_EQ(deserialized->reserved, handshake.reserved);
+    EXPECT_EQ(deserialized->info_hash, handshake.info_hash);
+    EXPECT_EQ(deserialized->peer_id, handshake.peer_id);
+
+    // Rejection tests
+    std::vector<uint8_t> short_bytes(bytes.begin(), bytes.begin() + 67);
+    EXPECT_FALSE(HandshakeMsg::deserialize(short_bytes).has_value());
+
+    std::vector<uint8_t> bad_len_bytes = bytes;
+    bad_len_bytes[0] = 18;
+    EXPECT_FALSE(HandshakeMsg::deserialize(bad_len_bytes).has_value());
+
+    std::vector<uint8_t> bad_protocol_bytes = bytes;
+    bad_protocol_bytes[1] = 'b';
+    EXPECT_FALSE(HandshakeMsg::deserialize(bad_protocol_bytes).has_value());
+}
+
+// 38. PeerMessage serialization and deserialization roundtrips
+TEST(PeerMessageTest, MessagesRoundtrip) {
+    std::vector<PeerMessage> test_messages = {
+        PeerMessage::keep_alive(),
+        PeerMessage::choke(),
+        PeerMessage::unchoke(),
+        PeerMessage::interested(),
+        PeerMessage::not_interested(),
+        PeerMessage::have(1234),
+        PeerMessage::bitfield({0x00, 0xFF, 0x55, 0xAA}),
+        PeerMessage::request(1, 2, 3),
+        PeerMessage::piece(5, 10, {0xDE, 0xAD, 0xBE, 0xEF}),
+        PeerMessage::cancel(10, 20, 30),
+        PeerMessage::port(8888)
+    };
+
+    for (const auto& msg : test_messages) {
+        auto bytes = msg.serialize();
+        size_t consumed = 0;
+        auto deserialized = PeerMessage::deserialize(bytes, consumed);
+        ASSERT_TRUE(deserialized.has_value());
+        EXPECT_EQ(*deserialized, msg);
+        EXPECT_EQ(consumed, bytes.size());
+    }
+}
+
+// 39. PeerMessage parsing TCP stream scenarios (partial delivery, concatenation)
+TEST(PeerMessageTest, StreamParsingScenarios) {
+    // 1. Partial length prefix
+    std::vector<uint8_t> data1 = {0x00, 0x00};
+    size_t consumed = 0;
+    auto res1 = PeerMessage::deserialize(data1, consumed);
+    EXPECT_FALSE(res1.has_value());
+    EXPECT_EQ(consumed, 0);
+
+    // 2. Full length but partial payload
+    std::vector<uint8_t> data2 = {0x00, 0x00, 0x00, 0x05, 0x04}; // Have message, wants 5 bytes but only got 1
+    auto res2 = PeerMessage::deserialize(data2, consumed);
+    EXPECT_FALSE(res2.has_value());
+    EXPECT_EQ(consumed, 0);
+
+    // 3. Concatenated messages
+    auto msg1 = PeerMessage::choke().serialize();
+    auto msg2 = PeerMessage::unchoke().serialize();
+    std::vector<uint8_t> stream;
+    stream.insert(stream.end(), msg1.begin(), msg1.end());
+    stream.insert(stream.end(), msg2.begin(), msg2.end());
+
+    size_t c1 = 0;
+    auto r1 = PeerMessage::deserialize(stream, c1);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, PeerMessage::choke());
+    EXPECT_EQ(c1, 5);
+
+    std::span<const uint8_t> remaining(stream.data() + c1, stream.size() - c1);
+    size_t c2 = 0;
+    auto r2 = PeerMessage::deserialize(remaining, c2);
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, PeerMessage::unchoke());
+    EXPECT_EQ(c2, 5);
+
+    // 4. Unrecognized message ID (graceful skip)
+    std::vector<uint8_t> unknown_msg = {0x00, 0x00, 0x00, 0x03, 0x63, 0x01, 0x02}; // ID 99 (0x63), length 3
+    size_t c3 = 0;
+    auto r3 = PeerMessage::deserialize(unknown_msg, c3);
+    EXPECT_FALSE(r3.has_value());
+    EXPECT_EQ(c3, 7); // skip 4 + 3 = 7 bytes
+}
+
+// 40. PeerConnection state machine, handshaking, and messages using socketpair
+TEST(PeerConnectionTest, FullStateMachineAndFlow) {
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    // Make both sockets non-blocking
+    fcntl(sv[0], F_SETFL, O_NONBLOCK);
+    fcntl(sv[1], F_SETFL, O_NONBLOCK);
+
+    EventLoop loop;
+    std::array<uint8_t, 20> info_hash;
+    std::fill(info_hash.begin(), info_hash.end(), 0x11);
+    std::array<uint8_t, 20> our_peer_id;
+    std::fill(our_peer_id.begin(), our_peer_id.end(), 0x22);
+
+    // Create PeerConnection with sv[0] (acting as client)
+    auto peer_conn = PeerConnection::create_with_socket(loop, sv[0], info_hash, our_peer_id);
+    
+    EXPECT_EQ(peer_conn->get_state(), ConnectionState::Handshaking);
+
+    // Verify client immediately sends its handshake on sv[0], which we can read from sv[1]
+    uint8_t read_buf[200];
+    ssize_t read_bytes = ::read(sv[1], read_buf, sizeof(read_buf));
+    ASSERT_EQ(read_bytes, 68);
+    auto client_handshake = HandshakeMsg::deserialize(std::span<const uint8_t>(read_buf, 68));
+    ASSERT_TRUE(client_handshake.has_value());
+    EXPECT_EQ(client_handshake->info_hash, info_hash);
+    EXPECT_EQ(client_handshake->peer_id, our_peer_id);
+
+    // Set up callbacks
+    bool handshake_called = false;
+    HandshakeMsg received_handshake;
+    peer_conn->on_handshake([&](const HandshakeMsg& h) {
+        handshake_called = true;
+        received_handshake = h;
+    });
+
+    std::vector<PeerMessage> received_msgs;
+    peer_conn->on_message([&](const PeerMessage& m) {
+        received_msgs.push_back(m);
+    });
+
+    bool disconnect_called = false;
+    peer_conn->on_disconnect([&]() {
+        disconnect_called = true;
+    });
+
+    // Send mock handshake from peer (sv[1] to sv[0])
+    HandshakeMsg peer_handshake;
+    std::fill(peer_handshake.reserved.begin(), peer_handshake.reserved.end(), 0x00);
+    std::fill(peer_handshake.info_hash.begin(), peer_handshake.info_hash.end(), 0x11);
+    std::fill(peer_handshake.peer_id.begin(), peer_handshake.peer_id.end(), 0x33);
+    auto hs_bytes = peer_handshake.serialize();
+    ssize_t written = ::write(sv[1], hs_bytes.data(), hs_bytes.size());
+    ASSERT_EQ(written, 68);
+
+    // Step event loop once to process readable handshake
+    loop.register_timer(std::chrono::milliseconds(1), [&]() {
+        loop.shutdown();
+    });
+    loop.run();
+
+    EXPECT_EQ(peer_conn->get_state(), ConnectionState::Active);
+    EXPECT_TRUE(handshake_called);
+    EXPECT_EQ(received_handshake.peer_id, peer_handshake.peer_id);
+
+    // Send mock messages from peer (sv[1] to sv[0])
+    // Unchoke + Interested
+    auto unchoke_msg = PeerMessage::unchoke();
+    auto interested_msg = PeerMessage::interested();
+    auto u_bytes = unchoke_msg.serialize();
+    auto i_bytes = interested_msg.serialize();
+    
+    // Write partially (TCP fragmentation simulation)
+    ssize_t w1 = ::write(sv[1], u_bytes.data(), u_bytes.size() - 1);
+    ASSERT_EQ(w1, static_cast<ssize_t>(u_bytes.size() - 1));
+    
+    // Run loop - should not trigger message callback yet (partial unchoke)
+    loop.register_timer(std::chrono::milliseconds(1), [&]() {
+        loop.shutdown();
+    });
+    loop.run();
+    EXPECT_TRUE(received_msgs.empty());
+
+    // Write the remaining byte of unchoke + full interested message
+    ssize_t w2 = ::write(sv[1], u_bytes.data() + u_bytes.size() - 1, 1);
+    ASSERT_EQ(w2, 1);
+    ssize_t w3 = ::write(sv[1], i_bytes.data(), i_bytes.size());
+    ASSERT_EQ(w3, static_cast<ssize_t>(i_bytes.size()));
+
+    // Run loop - should process both messages
+    loop.register_timer(std::chrono::milliseconds(1), [&]() {
+        loop.shutdown();
+    });
+    loop.run();
+
+    ASSERT_EQ(received_msgs.size(), 2);
+    EXPECT_EQ(received_msgs[0], unchoke_msg);
+    EXPECT_EQ(received_msgs[1], interested_msg);
+
+    EXPECT_FALSE(peer_conn->is_peer_choking());
+    EXPECT_TRUE(peer_conn->is_peer_interested());
+
+    // Send message from client to peer (sv[0] to sv[1]) and verify output draining
+    auto client_msg = PeerMessage::have(42);
+    peer_conn->send_message(client_msg);
+
+    // Run loop to drain write queue
+    loop.register_timer(std::chrono::milliseconds(1), [&]() {
+        loop.shutdown();
+    });
+    loop.run();
+
+    uint8_t out_msg_buf[100];
+    ssize_t out_bytes = ::read(sv[1], out_msg_buf, sizeof(out_msg_buf));
+    ASSERT_EQ(out_bytes, 9);
+    size_t consumed = 0;
+    auto read_msg = PeerMessage::deserialize(std::span<const uint8_t>(out_msg_buf, 9), consumed);
+    ASSERT_TRUE(read_msg.has_value());
+    EXPECT_EQ(*read_msg, client_msg);
+    EXPECT_EQ(consumed, 9);
+
+    // Disconnect test
+    ::close(sv[1]); // peer closes socket
+    
+    // Run loop - detects peer closure (EPOLLRDHUP/EPOLLIN with 0 read)
+    loop.register_timer(std::chrono::milliseconds(1), [&]() {
+        loop.shutdown();
+    });
+    loop.run();
+
+    EXPECT_EQ(peer_conn->get_state(), ConnectionState::Disconnected);
+    EXPECT_TRUE(disconnect_called);
+}
+
+// 41. Bitfield tests
+TEST(BitfieldTest, BasicOperationsAndEdgeCases) {
+    // 1. Construct empty
+    Bitfield bf1(10);
+    EXPECT_EQ(bf1.num_bits(), 10);
+    EXPECT_EQ(bf1.bytes().size(), 2);
+    EXPECT_EQ(bf1.count(), 0);
+
+    for (size_t i = 0; i < 10; ++i) {
+        EXPECT_FALSE(bf1.has(i));
+    }
+
+    // 2. Set bits and verify MSB-first indexing
+    bf1.set(0, true);
+    bf1.set(7, true);
+    bf1.set(8, true);
+
+    EXPECT_TRUE(bf1.has(0));
+    EXPECT_TRUE(bf1.has(7));
+    EXPECT_TRUE(bf1.has(8));
+    EXPECT_FALSE(bf1.has(1));
+    EXPECT_FALSE(bf1.has(9));
+    EXPECT_EQ(bf1.count(), 3);
+
+    // Verify raw bytes
+    // Piece 0 is 0x80, Piece 7 is 0x01 -> first byte should be 0x81 (129)
+    // Piece 8 is 0x80 -> second byte should be 0x80 (128)
+    ASSERT_EQ(bf1.bytes().size(), 2);
+    EXPECT_EQ(bf1.bytes()[0], 0x81);
+    EXPECT_EQ(bf1.bytes()[1], 0x80);
+
+    // 3. Construct from span and test padding bit clearing
+    // 10 bits, last 6 bits of 2nd byte are padding and must be cleared
+    std::vector<uint8_t> raw_bytes = {0xAA, 0xFF}; // 0xAA = 10101010, 0xFF = 11111111
+    Bitfield bf2(raw_bytes, 10);
+    EXPECT_EQ(bf2.num_bits(), 10);
+    ASSERT_EQ(bf2.bytes().size(), 2);
+    EXPECT_EQ(bf2.bytes()[0], 0xAA);
+    // last byte has 2 significant bits (indices 8, 9), rest 6 are padding (should be cleared to 0)
+    // 11000000 = 0xC0
+    EXPECT_EQ(bf2.bytes()[1], 0xC0);
+
+    // 4. Test Intersection operator &
+    // bf1 has bits: 0, 7, 8
+    // bf2 (0xAA, 0xC0) has bits: 0, 2, 4, 6, 8, 9
+    // Intersection should have bits: 0, 8
+    Bitfield intersection = bf1 & bf2;
+    EXPECT_EQ(intersection.num_bits(), 10);
+    EXPECT_EQ(intersection.count(), 2);
+    EXPECT_TRUE(intersection.has(0));
+    EXPECT_TRUE(intersection.has(8));
+    EXPECT_FALSE(intersection.has(7));
+    EXPECT_FALSE(intersection.has(9));
+
+    // Out of bounds safety
+    EXPECT_FALSE(bf1.has(99));
+    bf1.set(99, true); // should not crash, just ignore
+    EXPECT_FALSE(bf1.has(99));
+}
+
+// 42. PeerManager tests
+TEST(PeerManagerTest, ConnectionManagementAndBlacklisting) {
+    EventLoop loop;
+    std::array<uint8_t, 20> info_hash;
+    std::array<uint8_t, 20> our_peer_id;
+    info_hash.fill(0x11);
+    our_peer_id.fill(0x22);
+
+    // Create a PeerManager with max_connections = 2
+    PeerManager manager(loop, info_hash, our_peer_id, 2);
+
+    EXPECT_EQ(manager.active_connection_count(), 0);
+
+    // 1. Add peers from tracker
+    std::vector<PeerInfo> peers = {
+        {"127.0.0.1", 65001, ""},
+        {"127.0.0.1", 65002, ""},
+        {"127.0.0.1", 65003, ""} // This should exceed the limit of 2
+    };
+
+    manager.add_peers(peers);
+
+    // Active connection count should be exactly 2 (respecting max_connections)
+    EXPECT_EQ(manager.active_connection_count(), 2);
+    
+    auto active_list = manager.get_active_peers();
+    ASSERT_EQ(active_list.size(), 2);
+    EXPECT_EQ(active_list[0].first, "127.0.0.1");
+    EXPECT_EQ(active_list[1].first, "127.0.0.1");
+
+    // 2. Blacklisting peer {"127.0.0.1", 65001}
+    manager.blacklist_peer("127.0.0.1", 65001);
+    EXPECT_TRUE(manager.is_blacklisted("127.0.0.1", 65001));
+
+    // After blacklisting, it should have been disconnected and removed from active list
+    EXPECT_EQ(manager.active_connection_count(), 1);
+
+    // Try to add it again, it should be skipped because it is blacklisted
+    manager.add_peers({{"127.0.0.1", 65001, ""}});
+    EXPECT_EQ(manager.active_connection_count(), 1);
+
+    // Try to add the third peer now that there is room (active connections = 1, limit = 2)
+    manager.add_peers({{"127.0.0.1", 65003, ""}});
+    EXPECT_EQ(manager.active_connection_count(), 2);
+}
+
+
+
+
 
 
 
