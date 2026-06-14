@@ -23,8 +23,12 @@ FetchContent_Declare(
   spdlog
   GIT_REPOSITORY https://github.com/gabime/spdlog.git
   GIT_TAG        v1.13.0
+  SYSTEM
 )
 FetchContent_MakeAvailable(spdlog)
+if(TARGET spdlog)
+  set_target_properties(spdlog PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES $<TARGET_PROPERTY:spdlog,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 
 find_package(CURL REQUIRED)
 
@@ -50,9 +54,15 @@ add_executable(engine
               src/peer_connection.cpp
               src/bitfield.cpp
               src/peer_manager.cpp
+              src/piece_manager.cpp
+              src/piece_picker.cpp
+              src/download_coordinator.cpp
+              src/disk_io.cpp
+              src/config.cpp
 )
 
 target_include_directories(engine PUBLIC include)
+target_compile_options(engine PRIVATE -Wno-stringop-overflow)
 set_target_warnings(engine)
 enable_sanitisers(engine)
 target_link_libraries(engine PRIVATE
@@ -74,6 +84,11 @@ add_executable(tests
               src/peer_connection.cpp
               src/bitfield.cpp
               src/peer_manager.cpp
+              src/piece_manager.cpp
+              src/piece_picker.cpp
+              src/download_coordinator.cpp
+              src/disk_io.cpp
+              src/config.cpp
 )
 target_include_directories(tests PUBLIC include)
 set_target_warnings(tests)

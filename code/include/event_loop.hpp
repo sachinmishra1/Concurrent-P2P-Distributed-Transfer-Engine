@@ -43,6 +43,9 @@ public:
     // Terminate polling loop
     void shutdown();
 
+    // Print event loop dispatch latency stats
+    void print_latency_stats() const;
+
 private:
     struct Timer {
         uint64_t id;
@@ -61,4 +64,5 @@ private:
     std::unordered_map<int, EventCallback> fd_callbacks_;
     std::priority_queue<Timer, std::vector<Timer>, std::greater<Timer>> timers_;
     std::unordered_set<uint64_t> cancelled_timers_;
+    std::vector<double> latencies_us_;
 };

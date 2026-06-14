@@ -7,6 +7,8 @@
 
 class Bitfield {
 public:
+    Bitfield() = default;
+
     // Construct an empty bitfield for a given number of bits (pieces)
     explicit Bitfield(size_t num_bits);
 

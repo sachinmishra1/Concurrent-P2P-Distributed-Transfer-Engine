@@ -98,3 +98,13 @@ std::vector<std::pair<std::string, uint16_t>> PeerManager::get_active_peers() co
     }
     return result;
 }
+
+size_t PeerManager::established_connection_count() const {
+    size_t count = 0;
+    for (const auto& [key, peer] : active_peers_) {
+        if (peer->get_state() == ConnectionState::Active) {
+            count++;
+        }
+    }
+    return count;
+}

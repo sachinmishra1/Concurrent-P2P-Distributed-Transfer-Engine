@@ -42,6 +42,9 @@ public:
     // Get current connection count
     size_t active_connection_count() const { return active_peers_.size(); }
 
+    // Get count of connections where handshake is complete
+    size_t established_connection_count() const;
+
     // Get lists of connected / connecting peer IPs/ports
     std::vector<std::pair<std::string, uint16_t>> get_active_peers() const;
 

@@ -89,12 +89,22 @@ TrackerResponse TrackerClient::announce(uint16_t listening_port,
 
     // Some trackers require a User-Agent header
     ::curl_easy_setopt(curl, CURLOPT_USERAGENT, "ConcurrentP2PEngine/1.0");
+    ::curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 
     CURLcode res = ::curl_easy_perform(curl);
+    
+    long response_code = 0;
+    ::curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    
     ::curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
         throw std::runtime_error(std::string("TrackerClient: HTTP request failed: ") + ::curl_easy_strerror(res));
+    }
+
+    if (response_code != 200) {
+        throw std::runtime_error("TrackerClient: HTTP response code " + std::to_string(response_code) + 
+                                 " (Response: " + response_body.substr(0, 200) + ")");
     }
 
     return parse_response(std::span<const uint8_t>(

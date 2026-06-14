@@ -8,6 +8,7 @@ function(set_target_warnings target)
             -Wshadow             # warn when variable shadows another
             -Wconversion         # warn on implicit type conversions
             -Wsign-conversion    # warn on signed/unsigned conversions
+            -Wno-array-bounds # suppress GCC 13 array-bounds false positives completely
         )
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         target_compile_options(${target} PRIVATE

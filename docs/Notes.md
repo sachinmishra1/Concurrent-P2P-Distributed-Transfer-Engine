@@ -266,5 +266,151 @@ The `PeerManager` is responsible for orchestrating the lifecycle of all peer con
 - **Peer List Intake**: Processes `PeerInfo` records returned by the tracker client.
 - **Connection Rate Limiting**: Maintains a hard cap on active connections (defaulting to 128) to prevent socket depletion and process exhaustion.
 - **Lifetime Tracking**: Safely tracks and handles connecting, active, and disconnected peers.
-- **Security & Blacklisting**: Maintains a blacklist of misbehaving, corrupt, or duplicate peer addresses. Blacklisted peers are prevented from reconnecting, and any existing connection is severed immediately.
+- **Security & Blacklisting**: Maintains a blacklist of misbehaving, corrupt, or duplicate peer addresses. If a piece fails SHA-1 validation, the `DownloadCoordinator` triggers an `on_peer_corrupted` callback to the main orchestrator, which instantly blacklists the offending peer in the `PeerManager`, drops the TCP connection, and blocks any future connections from that IP.
 - **Reference Cycle Avoidance**: Registers event hooks (such as handshake and disconnection callbacks) using `std::weak_ptr<PeerConnection>` captures to prevent reference cycles and ensure deterministic resource reclamation when a connection is dropped.
+
+## Piece Manager
+
+The `PieceManager` manages download progression at the block and piece granularity, ensuring byte buffer integrity.
+
+### Block-Level Chunking
+- Standard protocol dictates that pieces are requested and transferred in smaller blocks (typically 16 KiB / 16384 bytes).
+- The `PieceManager` decomposes pieces into blocks, handling edge cases where the piece size (e.g. the final piece of the torrent or a non-multiple of 16 KiB) is not a multiple of block size.
+- Individual blocks track their state: `Pending`, `Requested`, or `Received`.
+
+### Piece Assembly and Validation
+- Received block data is copied directly into an allocated contiguous buffer corresponding to the target piece.
+- When all blocks are successfully received, the piece is marked complete and its data buffer is validated by hashing it via the `SHA1Hasher` and comparing the result to the 20-byte torrent metadata hash.
+- **Success Handling**: On hash matching, the client sets the corresponding bit in its local `Bitfield` and clears the temporary block-tracking buffer.
+- **Failure Handling**: On mismatch, the piece is discarded, and all blocks are returned to `Pending` so that they can be re-downloaded from alternate peers.
+
+## Piece Picker (Rarest-First)
+
+The `PiecePicker` controls piece selection strategies, maximizing block distribution efficiency and minimizing download bottleneck risk.
+
+### Availability Histogram
+- To identify which pieces are the rarest in the swarm, the `PiecePicker` maintains an availability histogram using a thread-safe `std::vector<std::atomic<uint32_t>>`.
+- When a peer connection completes handshaking and sends a `bitfield` (or subsequently sends `have` messages), the picker increments the availability count of the matching pieces.
+- Symmetrically, when a peer disconnects, its bitfield contribution is subtracted from the histogram, ensuring the tracking data accurately reflects active swarm status.
+
+### Bootstrap Selection Rule (First 4 Pieces)
+- During startup, the client has completed very few pieces (< 4).
+- If rarest-first were enforced during this initial phase, the client would request the absolute rarest pieces from the few peers that have them. These peers might be slow or choked, stalling the bootstrap.
+- To bootstrap quickly, the picker selects random pieces among those available from the peer. Obtaining a few random pieces quickly allows the client to unchoke itself and start exchanging pieces sooner.
+
+### Rarest-First Selection Rule
+- Once the bootstrap phase is complete (>= 4 pieces obtained), the client switches to strict rarest-first.
+- It finds candidate piece indices that the peer possesses and the client needs, then filters for those with the lowest positive value in the availability histogram.
+- If multiple candidates tie for lowest availability, the picker chooses one randomly. This load-balances requests across different pieces to avoid multiple connections attempting to fetch the exact same blocks.
+
+## Download Coordinator (Request Pipeline)
+
+The `DownloadCoordinator` integrates peer connections, the piece manager, and the piece picker to drive the asynchronous download loop.
+
+### Asynchronous Pipelining
+- To hide network latency, the coordinator pipelines up to 5 concurrent block requests per unchoked peer.
+- The `fill_request_pipeline` helper keeps sending block request messages (`REQUEST`) to a peer until 5 requests are outstanding.
+- Request selection is driven by asking the `PiecePicker` for a piece, then extracting the next unrequested block from `PieceManager`.
+
+### Message Handling & Error Recovery
+- **Unchoke**: Triggers the request filling loop to kick off downloading from the peer.
+- **Choke**: Erases the peer's outstanding requests from the coordinator, and flags their corresponding blocks as `Pending` in the `PieceManager` so they can be re-allocated to other peers.
+- **Bitfield/Have**: Updates the piece availability histogram in `PiecePicker` and updates our interest status (`INTERESTED` message).
+- **Piece**: Receives a block payload, writes it to the piece manager, and tops off the pipeline.
+- **Cancel on Completion**: When a piece finishes validation successfully, the coordinator broadcasts a `CANCEL` message for all pending blocks of that piece to all peers, preventing duplicate downloads and freeing up request pipeline capacity.
+
+## Disk I/O Manager
+
+The `DiskIOManager` handles the physical storage layout on disk, managing file system paths, allocations, file-span mapping, and raw piece read/writes.
+
+### Directory and File Pre-allocation
+- Before beginning a download, BitTorrent clients pre-allocate all output files to their expected sizes. This:
+  - Ensures sufficient disk space is available upfront, preventing middle-of-download write failures.
+  - Minimizes filesystem fragmentation, optimizing sequential write throughput.
+- We implement this by recursively creating parent directories via `std::filesystem::create_directories` and using C++17 `std::filesystem::resize_file` to instantly size files to their exact bytes.
+
+### Piece-to-File Boundary Mapping
+- In BitTorrent, the files in a multi-file torrent are treated as a single concatenated virtual byte space.
+- A single piece index represents a contiguous range of bytes in this virtual space:
+  - `global_offset = piece_idx * piece_length`
+- When a piece is written, it may span across file boundaries.
+- To handle this, `DiskIOManager` calculates the overlap between the piece's range `[global_offset, global_offset + piece_size)` and each file's virtual range `[file.offset, file.offset + file.length)`:
+  - If they overlap, it calculates the relative offsets (`offset_in_file` and `offset_in_data`) and writes/reads only that specific overlapping slice using binary file streams (`std::fstream`).
+  - This robust design supports single-file torrents, normal multi-file torrents, and pieces spanning multiple files.
+
+### SHA-1 Re-verification
+- To guarantee that files written to disk are free of corruptions (e.g. from disk write errors or bad memory sectors), the `DiskIOManager` provides a `verify_piece` method.
+- This reads the piece data back from the filesystem, hashes it using `SHA1Hasher`, and verifies it matches the original torrent metadata hash.
+
+## CLI Argument Parsing
+
+The CLI argument parser configures application parameters from command-line arguments.
+
+### Configuration Parameters
+- **Torrent File**: Positional argument specifying the path to the `.torrent` metadata file.
+- **Output Directory**: `--output-dir=<dir>` option where downloaded files will be stored (defaults to `.`).
+- **Log Level**: `--log-level=<level>` setting logging severity (`debug`, `info`, `warn`, `error`, defaults to `info`).
+- **Max Peers**: `--max-peers=<n>` defining maximum concurrent peer connections (defaults to `50`).
+- **Help**: `--help` or `-h` displaying option usage instructions.
+
+### Parser Robustness & Validations
+- **Prefix Matching**: Correctly parses key-value pairs formatted with an `=` sign (e.g. `--max-peers=128`).
+- **Uniqueness**: Ensures that exactly one positional torrent file is specified.
+- **Strict Typing**: Validates that `--max-peers` contains a valid positive integer.
+- **File Verification**: Verifies that the targeted torrent file actually exists on the filesystem prior to running.
+
+## Main Download Orchestration
+
+The `main.cpp` entrypoint wires all components together into a single, cohesive executable.
+
+### Azureus-style Peer ID Generation
+- We generate a unique 20-byte Peer ID consisting of a client prefix (`-DT0001-`) and 12 random characters selected from an alphanumeric alphabet.
+- This conforms to the unofficial BitTorrent client standard, enabling trackers and other clients to identify this engine.
+
+### Signal Handling and Graceful Shutdown
+- To handle `Ctrl+C` (`SIGINT`) gracefully:
+  - We register a signal handler that sets a volatile `sig_atomic_t` flag.
+  - A recurring 250ms timer is registered on the `EventLoop`. When the timer fires and detects the shutdown flag, it stops the event loop using `EventLoop::shutdown()`.
+  - This guarantees that sockets, files, and resources are closed and cleaned up cleanly without leaving corrupted states or leaked descriptors.
+
+## Progress Display and Statistics
+
+Real-time feedback is printed to `stdout` in-place.
+
+### Dynamic Rendering
+- We print update lines using the carriage return (`\r`) character without a trailing newline (`\n`). This resets the cursor to the beginning of the current console line, allowing us to overwrite it on the next update.
+- We flush `stdout` using `std::fflush(stdout)` to ensure the line is immediately rendered on terminals even without newline feeds.
+
+### Statistic Calculations
+1. **Download Progress & Speed**:
+   - We query `PieceManager::bitfield()` to count the number of completed pieces.
+   - We calculate downloaded bytes by summing the size of completed pieces.
+   - Every second, we measure the delta between the current downloaded bytes and the previous second's downloaded bytes, giving us the current download speed (in MB/s).
+2. **Estimated Time to Completion (ETA)**:
+   - Remaining bytes is calculated as `total_length - downloaded_bytes`.
+   - Dividing remaining bytes by the current speed yields the remaining seconds, formatted as `Xm Ys`.
+3. **Progress Bar**:
+   - A 20-character progress bar dynamically fills based on the completion percentage. Completed portions are drawn using `█`, and remaining portions are drawn using `░`.
+
+## Command Line Custom Peer Override
+
+To facilitate local testing, debugging, and offline operations, the client supports manually specifying a peer connection.
+
+### Custom Peer Argument
+- **Option**: `--peer=<ip>:<port>` (e.g. `--peer=127.0.0.1:6881`).
+- **Behavior**:
+  - If specified, the engine schedules an outgoing TCP connection to the designated peer directly via `PeerManager::connect_to_peer`.
+  - When the primary tracker is unreachable or returns a failure response, the engine ignores the tracker failure and proceeds to download from the manually specified peer instead of exiting.
+  - The progress bar displays the count of fully established/active peer connections (i.e. where the BitTorrent handshake has succeeded) rather than just connecting/idle peer connection objects.
+
+## Local End-to-End Testing Harness
+
+An automated end-to-end testing script `tests/e2e_seeder.py` verifies the entire pipeline:
+1. **Dynamic Torrent Creation**: Automatically generates a 1MB test file containing random bytes, partitions it into 4 pieces of 256KB, computes their SHA-1 hashes, and outputs a valid bencoded `.torrent` file.
+2. **Mock Seeder Protocol Server**: Hosts a local TCP server that implements the BitTorrent peer wire protocol:
+  - Completes the handshake and validates the client's `info_hash`.
+  - Sends a Bitfield message indicating it has 100% of the pieces (`\xf0`).
+  - Sends an Unchoke message to allow the client to request data.
+  - Responds to incoming block `request` messages with the correct chunk of bytes.
+  - Processes client `HAVE` messages.
+3. **Execution & Validation**: Invokes the C++ engine binary using Python's `subprocess` API, verifies that the download is completed, runs a SHA-1 validation check comparing the output file to the original, and prints the result before cleaning up temporary files.

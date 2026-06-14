@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <stdexcept>
 #include <errno.h>
+#include <algorithm>
+#include <spdlog/spdlog.h>
 
 EventLoop::EventLoop() {
     epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
@@ -117,12 +119,18 @@ void EventLoop::run() {
             break;
         }
 
+        auto wait_end = std::chrono::high_resolution_clock::now();
+
         for (int i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd;
             uint32_t epoll_evs = events[i].events;
 
             auto it = fd_callbacks_.find(fd);
             if (it != fd_callbacks_.end()) {
+                auto callback_start = std::chrono::high_resolution_clock::now();
+                auto latency = std::chrono::duration_cast<std::chrono::microseconds>(callback_start - wait_end).count();
+                const_cast<EventLoop*>(this)->latencies_us_.push_back(static_cast<double>(latency));
+
                 // Copy/invoke callback safely
                 auto callback = it->second;
                 callback(fd, epoll_evs);
@@ -133,4 +141,31 @@ void EventLoop::run() {
 
 void EventLoop::shutdown() {
     running_ = false;
+}
+
+void EventLoop::print_latency_stats() const {
+    if (latencies_us_.empty()) {
+        std::printf("Event Loop Dispatch Latency: no events recorded.\n");
+        return;
+    }
+    std::vector<double> sorted = latencies_us_;
+    std::sort(sorted.begin(), sorted.end());
+
+    size_t n = sorted.size();
+    double p50 = sorted[n * 50 / 100];
+    double p95 = sorted[n * 95 / 100];
+    double p99 = sorted[n * 99 / 100];
+    double avg = 0;
+    for (double lat : sorted) {
+        avg += lat;
+    }
+    avg /= static_cast<double>(n);
+
+    std::printf("\n==================================================\n");
+    std::printf("EVENT LOOP DISPATCH LATENCY (%zu samples):\n", n);
+    std::printf("  Average:      %.2f us\n", avg);
+    std::printf("  p50 (Median): %.2f us\n", p50);
+    std::printf("  p95:          %.2f us\n", p95);
+    std::printf("  p99:          %.2f us\n", p99);
+    std::printf("==================================================\n\n");
 }
